@@ -18,10 +18,10 @@ let package = Package(
         .target(
             name: "PhotoOrganizer",
             dependencies: [],
-            path: ".",
-            exclude: ["README.md", "LICENSE", "Package.swift"],
+            path: "Sources/PhotoOrganizer",
+            exclude: [],
             resources: [
-                .process("Resources")
+                .process("../Resources")
             ]
         ),
         .testTarget(

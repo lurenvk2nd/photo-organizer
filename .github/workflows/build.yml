@@ -1,0 +1,27 @@
+name: 构建iOS应用
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: 下载代码
+      uses: actions/checkout@v3
+      
+    - name: 设置Xcode
+      run: sudo xcode-select -switch /Applications/Xcode.app
+      
+    - name: 构建Swift包
+      run: swift build
+      
+    - name: 运行测试
+      run: swift test
+      
+    - name: 构建成功
+      run: echo "🎉 恭喜！项目构建成功！"

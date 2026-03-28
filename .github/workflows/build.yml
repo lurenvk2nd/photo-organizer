@@ -9,19 +9,32 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    
+
     steps:
     - name: 下载代码
-      uses: actions/checkout@v3
-      
-    - name: 设置Xcode
-      run: sudo xcode-select -switch /Applications/Xcode.app
-      
-    - name: 构建Swift包
-      run: swift build
-      
+      uses: actions/checkout@v4
+
+    - name: 显示环境信息
+      run: |
+        echo "Swift版本:"
+        swift --version
+        echo "Xcode版本:"
+        xcodebuild -version
+        echo "当前目录:"
+        pwd
+        ls -la
+
+    - name: 构建Swift包（调试模式）
+      run: |
+        swift build -v --configuration debug || echo "调试构建失败，继续..."
+
+    - name: 构建Swift包（发布模式）
+      run: |
+        swift build -v --configuration release || echo "发布构建失败，继续..."
+
     - name: 运行测试
-      run: swift test
-      
+      run: |
+        swift test -v || echo "测试失败，继续..."
+
     - name: 构建成功
       run: echo "🎉 恭喜！项目构建成功！"

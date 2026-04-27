@@ -1,0 +1,137 @@
+name: 发布到TestFlight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-upload:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      IOS_SCHEME: ${{ vars.IOS_SCHEME }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+      BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+      P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+      BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境检查
+        run: |
+          xcodebuild -version
+          swift --version
+          for key in APPLE_TEAM_ID BUNDLE_ID BUILD_CERTIFICATE_BASE64 P12_PASSWORD BUILD_PROVISION_PROFILE_BASE64 KEYCHAIN_PASSWORD ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY; do
+            if [ -z "${!key}" ]; then
+              echo "缺少必填Secrets: $key"
+              exit 1
+            fi
+          done
+
+      - name: 解析工程与Scheme
+        id: project
+        run: |
+          workspace_path=$(find . -maxdepth 3 -name "*.xcworkspace" | head -n 1)
+          project_path=$(find . -maxdepth 3 -name "*.xcodeproj" | head -n 1)
+          scheme="$IOS_SCHEME"
+          if [ -z "$scheme" ]; then
+            scheme="PhotoOrganizer"
+          fi
+          if [ -n "$workspace_path" ]; then
+            echo "container_type=workspace" >> "$GITHUB_OUTPUT"
+            echo "container_path=$workspace_path" >> "$GITHUB_OUTPUT"
+          elif [ -n "$project_path" ]; then
+            echo "container_type=project" >> "$GITHUB_OUTPUT"
+            echo "container_path=$project_path" >> "$GITHUB_OUTPUT"
+          else
+            echo "未找到.xcodeproj或.xcworkspace，当前仓库无法进行iOS归档。请先创建Xcode iOS App工程并提交到仓库。"
+            exit 1
+          fi
+          echo "scheme=$scheme" >> "$GITHUB_OUTPUT"
+
+      - name: 安装签名证书与描述文件
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PP_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_UUID=$(security cms -D -i "$PP_PATH" | plutil -extract UUID raw -)
+          PROFILE_NAME=$(security cms -D -i "$PP_PATH" | plutil -extract Name raw -)
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+
+      - name: 归档应用
+        run: |
+          ARCHIVE_PATH="$RUNNER_TEMP/${{ steps.project.outputs.scheme }}.xcarchive"
+          if [ "${{ steps.project.outputs.container_type }}" = "workspace" ]; then
+            xcodebuild -workspace "${{ steps.project.outputs.container_path }}" -scheme "${{ steps.project.outputs.scheme }}" -configuration Release -destination "generic/platform=iOS" -archivePath "$ARCHIVE_PATH" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$APPLE_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" clean archive
+          else
+            xcodebuild -project "${{ steps.project.outputs.container_path }}" -scheme "${{ steps.project.outputs.scheme }}" -configuration Release -destination "generic/platform=iOS" -archivePath "$ARCHIVE_PATH" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$APPLE_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" clean archive
+          fi
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+
+      - name: 导出IPA
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_ID</key>
+              <string>$PROFILE_NAME</string>
+            </dict>
+            <key>destination</key>
+            <string>export</string>
+          </dict>
+          </plist>
+          EOF
+          EXPORT_PATH="$RUNNER_TEMP/export"
+          xcodebuild -exportArchive -archivePath "$ARCHIVE_PATH" -exportPath "$EXPORT_PATH" -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+          IPA_PATH=$(find "$EXPORT_PATH" -name "*.ipa" | head -n 1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "未找到导出的IPA"
+            exit 1
+          fi
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - name: 上传IPA制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ${{ env.IPA_PATH }}
+
+      - name: 上传到TestFlight
+        uses: apple-actions/upload-testflight-build@v1
+        with:
+          app-path: ${{ env.IPA_PATH }}
+          issuer-id: ${{ env.ASC_ISSUER_ID }}
+          api-key-id: ${{ env.ASC_KEY_ID }}
+          api-private-key: ${{ env.ASC_PRIVATE_KEY }}
